@@ -34,7 +34,7 @@ const (
 
 	opSerial           = 0x03 // factory serial number (read)
 	opGetFriendlyName  = 0x04 // user "friendly" name (read)
-	opSetFriendlyName  = 0x05 // user "friendly" name (write); INFERRED opcode
+	opSetFriendlyName  = 0x05 // user "friendly" name (write)
 	opGetBluetoothName = 0x06 // bluetooth name (read)
 	opSetBluetoothName = 0x07 // bluetooth name (write)
 
@@ -53,10 +53,6 @@ const (
 	opSetPosition    = 0x57 // move to a slot (write); payload [target]
 	opCalibrate      = 0x58 // home + re-align (write); descriptor byte[1]=0x01
 )
-
-// maxName caps name payloads to fit one report (frame[3:] is 62 bytes). The
-// device's true maximum is unknown; this is a safe upper bound, pending hardware.
-const maxName = reportLen - 3
 
 // Status reply layout: temperature and counter are big-endian int32; filterStatus
 // and filterPosition are single bytes.
@@ -313,7 +309,8 @@ func (o *Oasis) ConfigRaw() ([]byte, error) {
 }
 
 // Config mirrors the device's config block (mask = big-endian int32 at +2; the rest
-// single bytes at +6..+9), pending hardware confirmation.
+// single bytes at +6..+9). Hardware-confirmed 2026-06-10: a no-op write round-trips
+// byte-identical and toggling turbo changes only its byte.
 type Config struct {
 	Mask        uint32
 	Speed       int
@@ -424,8 +421,9 @@ func (o *Oasis) Handshake() error {
 	return nil
 }
 
-// VersionRaw returns the cached opInfoA handshake replys (inferred to carry
-// firmware version; layout pending hardware). nil if Handshake hasn't run.
+// VersionRaw returns the cached opInfoA handshake reply (the version block).
+// Hardware-confirmed: decodes to HW 2.4.0.0, FW 1.7.1.0, built "Apr 23 2026, 17:28:10".
+// nil if Handshake hasn't run.
 func (o *Oasis) VersionRaw() []byte {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -540,20 +538,55 @@ func (o *Oasis) setName32(opcode byte, name string) error {
 	return err
 }
 
+// slotNameLen is the per-slot name field width. Slot-name commands carry a fixed
+// [slot]+16-byte payload (17 bytes, descriptor length 0x11); the reply echoes the slot
+// at [2] and the 16-byte name from [3]. A variable-length name payload gets no reply.
+const slotNameLen = 16
+
+// slotNameField builds the fixed [slot, name padded to 16] slot-name payload.
+func slotNameField(slot int, name string) []byte {
+	p := make([]byte, 1+slotNameLen)
+	p[0] = byte(slot)
+	copy(p[1:], name)
+	return p
+}
+
+// slotNameAt extracts the 16-byte name (NUL-trimmed) from a slot-name reply: the name
+// follows the opcode echo, length, and echoed slot byte (data offset 3).
+func slotNameAt(r []byte) (string, error) {
+	if len(r) < tableDataOff {
+		return "", errors.New("oasis: short slot-name reply")
+	}
+	end := tableDataOff + slotNameLen
+	if end > len(r) {
+		end = len(r)
+	}
+	return trimName(r[tableDataOff:end]), nil
+}
+
 // SlotName reads the name of a 0-based filter slot.
 func (o *Oasis) SlotName(slot int) (string, error) {
 	if slot < 0 || slot > 0xff {
 		return "", fmt.Errorf("oasis: slot %d out of range", slot)
 	}
-	return o.readName(opGetSlotName, []byte{byte(slot)})
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	r, err := o.command(opGetSlotName, slotNameField(slot, ""))
+	if err != nil {
+		return "", err
+	}
+	return slotNameAt(r)
 }
 
-// SetSlotName writes the name of a 0-based filter slot.
+// SetSlotName writes the name of a 0-based filter slot (truncated to 16 bytes).
 func (o *Oasis) SetSlotName(slot int, name string) error {
 	if slot < 0 || slot > 0xff {
 		return fmt.Errorf("oasis: slot %d out of range", slot)
 	}
-	return o.writeName(opSetSlotName, []byte{byte(slot)}, name)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	_, err := o.command(opSetSlotName, slotNameField(slot, name))
+	return err
 }
 
 // --- Per-slot focus offsets & colors (8-entry int32 big-endian tables) ---
@@ -562,9 +595,6 @@ func (o *Oasis) SetSlotName(slot int, name string) error {
 // int32 entries, indexed by slot. The command payload is [page, 0x00*32]
 // (descriptor byte[1] = 0x21 = 33), and the reply carries the 8 int32 starting at
 // data offset 3, each run through ntohl. The SET-page frame mirrors the GET page —
-// HARDWARE-VALIDATED 2026-06-09: SetFocusOffset(slot,-150)→reads back -150 (signed int32
-// round-trips); SetColor(slot,0xff112233)→reads back byte-identical (so colors are 0xAARRGGBB
-// ARGB — alpha high byte, matching the stock colors = CSS names + alpha 0xff). Restored after.
 const (
 	tableEntries  = 8                  // entries per page
 	tableDataOff  = 3                  // reply offset where the int32 table begins
@@ -592,7 +622,6 @@ func (o *Oasis) getTableEntry(getOp byte, slot int) (uint32, error) {
 }
 
 // setTableEntry does a read-modify-write of the slot's page (the SET frame mirrors GET;
-// hardware-validated — see the table-section comment above).
 func (o *Oasis) setTableEntry(getOp, setOp byte, slot int, v uint32) error {
 	if slot < 0 || slot > 0xff {
 		return fmt.Errorf("oasis: slot %d out of range", slot)
@@ -688,14 +717,15 @@ func (o *Oasis) Names() ([]string, error) {
 	}
 	out := make([]string, n)
 	for i := 0; i < n; i++ {
-		r, err := o.command(opGetSlotName, []byte{byte(i)})
+		r, err := o.command(opGetSlotName, slotNameField(i, ""))
 		if err != nil {
 			return nil, err
 		}
-		if len(r) < 2 {
-			return nil, errors.New("oasis: short slot-name reply")
+		name, err := slotNameAt(r)
+		if err != nil {
+			return nil, err
 		}
-		out[i] = trimName(r[2:])
+		out[i] = name
 	}
 	return out, nil
 }
@@ -751,19 +781,6 @@ func (o *Oasis) readName(opcode byte, payload []byte) (string, error) {
 		return "", fmt.Errorf("oasis: short reply to 0x%02x", opcode)
 	}
 	return trimName(r[2:]), nil
-}
-
-// writeName sends prefix (e.g. a slot index) followed by the name bytes, truncated
-// to fit one report.
-func (o *Oasis) writeName(opcode byte, prefix []byte, name string) error {
-	nb := []byte(name)
-	if max := maxName - len(prefix); len(nb) > max {
-		nb = nb[:max]
-	}
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	_, err := o.command(opcode, append(append([]byte(nil), prefix...), nb...))
-	return err
 }
 
 // trimName returns b up to the first NUL byte.

@@ -107,7 +107,7 @@ func allReplies() map[byte][]byte {
 		opStatus:           {opStatus, 0x08, 0, 0, 0, 0, stateIdle, 0x01, 0, 0}, // filterStatus@6, filterPosition@7
 		opFactoryReset:     {opFactoryReset, 0x00},
 		opSlotNum:          {opSlotNum, 0x01, 0x07},
-		opGetSlotName:      {opGetSlotName, 0x02, 'R', 0},
+		opGetSlotName:      {opGetSlotName, 0x11, 0x00, 'R', 0}, // [echo, len, slot-echo, name@3…]
 		opSetSlotName:      {opSetSlotName, 0x00},
 		opGetFocusOffset:   tableReply(opGetFocusOffset, 0, 100),
 		opSetFocusOffset:   {opSetFocusOffset, 0x00},
@@ -134,8 +134,8 @@ func TestEncodeCommands(t *testing.T) {
 		{"config", func(o *Oasis) { o.ConfigRaw() }, []byte{0x00, opConfig, 0x00}},
 		{"factory reset", func(o *Oasis) { o.FactoryReset() }, []byte{0x00, opFactoryReset, 0x00}},
 		{"friendly name get", func(o *Oasis) { o.FriendlyName() }, []byte{0x00, opGetFriendlyName, 0x00}},
-		{"slot name get", func(o *Oasis) { o.SlotName(2) }, []byte{0x00, opGetSlotName, 0x01, 0x02}},
-		{"slot name set", func(o *Oasis) { o.SetSlotName(1, "R") }, []byte{0x00, opSetSlotName, 0x02, 0x01, 'R'}},
+		{"slot name get", func(o *Oasis) { o.SlotName(2) }, []byte{0x00, opGetSlotName, 0x11, 0x02}},              // [slot]+16, len 0x11
+		{"slot name set", func(o *Oasis) { o.SetSlotName(1, "R") }, []byte{0x00, opSetSlotName, 0x11, 0x01, 'R'}}, // [slot, name…16]
 		{"focus offset get", func(o *Oasis) { o.FocusOffset(3) }, []byte{0x00, opGetFocusOffset, 0x21, 0x00}},
 		{"focus offset set", func(o *Oasis) { o.SetFocusOffset(3, 100) }, []byte{0x00, opSetFocusOffset, 0x21, 0x00}},
 		{"color get", func(o *Oasis) { o.Color(0) }, []byte{0x00, opGetColor, 0x21, 0x00}},
@@ -509,5 +509,45 @@ func TestShortReplies(t *testing.T) {
 		if err := c(); err == nil {
 			t.Errorf("%s: got nil err, want a short-reply error", name)
 		}
+	}
+}
+
+// TestSlotNameFraming locks in the framing derived from the vendor object code:
+// slot-name commands carry a fixed [slot]+16-byte payload (descriptor length 0x11),
+// the name is NUL-padded and truncated to 16, and the reply name starts at offset 3.
+func TestSlotNameFraming(t *testing.T) {
+	// SET: [slot, name padded to 16], total payload 17.
+	f := newFake()
+	f.replies[opSetSlotName] = []byte{opSetSlotName, 0x00}
+	if err := testOasis(f).SetSlotName(2, "Ha"); err != nil {
+		t.Fatal(err)
+	}
+	w := f.writeFor(opSetSlotName)
+	if w == nil {
+		t.Fatal("no SetSlotName written")
+	}
+	if w[2] != 0x11 {
+		t.Errorf("payload len = 0x%02x, want 0x11", w[2])
+	}
+	want := append([]byte{0x02, 'H', 'a'}, make([]byte, 14)...) // slot 2, "Ha", NUL-padded to 16
+	if got := w[3 : 3+1+slotNameLen]; !bytes.Equal(got, want) {
+		t.Errorf("payload = % x, want % x", got, want)
+	}
+
+	// A >16-byte name is truncated to the 16-byte field.
+	f2 := newFake()
+	f2.replies[opSetSlotName] = []byte{opSetSlotName, 0x00}
+	if err := testOasis(f2).SetSlotName(0, "0123456789ABCDEFGHIJ"); err != nil {
+		t.Fatal(err)
+	}
+	if w := f2.writeFor(opSetSlotName); !bytes.Equal(w[4:4+slotNameLen], []byte("0123456789ABCDEF")) {
+		t.Errorf("name field = %q, want first 16 chars only", w[4:4+slotNameLen])
+	}
+
+	// GET: name decoded from reply offset 3 (after echo, len, slot-echo).
+	f3 := newFake()
+	f3.replies[opGetSlotName] = []byte{opGetSlotName, 0x11, 0x02, 'H', 'a', 0}
+	if s, err := testOasis(f3).SlotName(2); err != nil || s != "Ha" {
+		t.Fatalf("SlotName()=%q,%v want Ha", s, err)
 	}
 }
