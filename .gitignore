@@ -1,0 +1,11 @@
+# Built probe binaries
+/oasisfocprobe
+/oasisfwprobe
+*.exe
+
+# Go test / coverage artifacts
+*.test
+*.out
+
+# OS / editor cruft
+.DS_Store
