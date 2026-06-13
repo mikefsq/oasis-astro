@@ -109,9 +109,11 @@ func allReplies() map[byte][]byte {
 		opSlotNum:          {opSlotNum, 0x01, 0x07},
 		opGetSlotName:      {opGetSlotName, 0x11, 0x00, 'R', 0}, // [echo, len, slot-echo, name@3…]
 		opSetSlotName:      {opSetSlotName, 0x00},
-		opGetFocusOffset:   tableReply(opGetFocusOffset, 0, 100),
+		// Wire slots are 1-based: ASCOM slot 0 reads flat table entry 1, so the canned
+		// value sits at entry 1 (entry 0 is the unused wire slot 0).
+		opGetFocusOffset:   tableReply(opGetFocusOffset, 1, 100),
 		opSetFocusOffset:   {opSetFocusOffset, 0x00},
-		opGetColor:         tableReply(opGetColor, 0, 0x00112233),
+		opGetColor:         tableReply(opGetColor, 1, 0x00112233),
 		opSetColor:         {opSetColor, 0x00},
 		opSetPosition:      {opSetPosition, 0x00},
 		opCalibrate:        {opCalibrate, 0x00},
@@ -134,8 +136,8 @@ func TestEncodeCommands(t *testing.T) {
 		{"config", func(o *Oasis) { o.ConfigRaw() }, []byte{0x00, opConfig, 0x00}},
 		{"factory reset", func(o *Oasis) { o.FactoryReset() }, []byte{0x00, opFactoryReset, 0x00}},
 		{"friendly name get", func(o *Oasis) { o.FriendlyName() }, []byte{0x00, opGetFriendlyName, 0x00}},
-		{"slot name get", func(o *Oasis) { o.SlotName(2) }, []byte{0x00, opGetSlotName, 0x11, 0x02}},              // [slot]+16, len 0x11
-		{"slot name set", func(o *Oasis) { o.SetSlotName(1, "R") }, []byte{0x00, opSetSlotName, 0x11, 0x01, 'R'}}, // [slot, name…16]
+		{"slot name get (1-based on wire)", func(o *Oasis) { o.SlotName(2) }, []byte{0x00, opGetSlotName, 0x11, 0x03}},              // [slot+1]+16, len 0x11
+		{"slot name set (1-based on wire)", func(o *Oasis) { o.SetSlotName(1, "R") }, []byte{0x00, opSetSlotName, 0x11, 0x02, 'R'}}, // [slot+1, name…16]
 		{"focus offset get", func(o *Oasis) { o.FocusOffset(3) }, []byte{0x00, opGetFocusOffset, 0x21, 0x00}},
 		{"focus offset set", func(o *Oasis) { o.SetFocusOffset(3, 100) }, []byte{0x00, opSetFocusOffset, 0x21, 0x00}},
 		{"color get", func(o *Oasis) { o.Color(0) }, []byte{0x00, opGetColor, 0x21, 0x00}},
@@ -529,7 +531,7 @@ func TestSlotNameFraming(t *testing.T) {
 	if w[2] != 0x11 {
 		t.Errorf("payload len = 0x%02x, want 0x11", w[2])
 	}
-	want := append([]byte{0x02, 'H', 'a'}, make([]byte, 14)...) // slot 2, "Ha", NUL-padded to 16
+	want := append([]byte{0x03, 'H', 'a'}, make([]byte, 14)...) // slot 2 -> wire 3 (1-based), "Ha", NUL-padded to 16
 	if got := w[3 : 3+1+slotNameLen]; !bytes.Equal(got, want) {
 		t.Errorf("payload = % x, want % x", got, want)
 	}

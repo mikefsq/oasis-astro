@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"time"
 )
 
 // --- Oasis HID framing
@@ -27,6 +28,13 @@ const (
 	reportLen   = 65   // 1 report-ID byte + 64-byte payload
 	reportID    = 0x00 // this device uses report ID 0 (unnumbered); it leads the OUT buffer
 	replyWaitMS = 100  // hid_read_timeout
+
+	// A transient HID write failure (USB power-management wake on a Full-Speed device,
+	// a hub transaction-translator stall, or a brief IOKit hiccup) is retried before the
+	// device is declared lost. Safe to resend: a failed IOHIDDeviceSetReport did not
+	// deliver the report, so the device receives the command exactly once.
+	writeTries        = 3
+	writeRetryBackoff = 8 * time.Millisecond
 
 	// Opcodes (command descriptor byte[0]). Get/set pairs differ by 1.
 	opInfoA = 0x02 // version (reply 36B = version fields + build-date string)
@@ -135,8 +143,15 @@ func (o *Oasis) command(opcode byte, payload []byte) ([]byte, error) {
 	frame[1] = opcode
 	frame[2] = byte(len(payload))
 	copy(frame[3:], payload)
-	if _, err := o.t.Write(frame); err != nil {
-		return nil, fmt.Errorf("oasis: write opcode 0x%02x: %w", opcode, err)
+	var werr error
+	for try := 0; try < writeTries; try++ {
+		if _, werr = o.t.Write(frame); werr == nil {
+			break
+		}
+		time.Sleep(writeRetryBackoff) // transient stall — brief backoff, then resend
+	}
+	if werr != nil {
+		return nil, fmt.Errorf("oasis: write opcode 0x%02x (after %d tries): %w", opcode, writeTries, werr)
 	}
 
 	// Read the reply, SKIPPING any stale report whose echo != our opcode. The interrupt-IN
@@ -543,10 +558,15 @@ func (o *Oasis) setName32(opcode byte, name string) error {
 // at [2] and the 16-byte name from [3]. A variable-length name payload gets no reply.
 const slotNameLen = 16
 
-// slotNameField builds the fixed [slot, name padded to 16] slot-name payload.
+// slotNameField builds the fixed [slot, name padded to 16] slot-name payload. The
+// wire slot is 1-based — the same +1 convention as SetPosition (the device numbers
+// physical positions 1..N; position 0 is unused). The caller passes a 0-based ASCOM
+// slot, so reading/writing ASCOM slot i addresses wire slot i+1. Without this the
+// name table reads one slot low: ASCOM slot 0 hit the empty wire slot 0 and every
+// real name came back shifted up by one (hardware-confirmed against an LRGB+Ha wheel).
 func slotNameField(slot int, name string) []byte {
 	p := make([]byte, 1+slotNameLen)
-	p[0] = byte(slot)
+	p[0] = byte(slot + 1) // wire is 1-based
 	copy(p[1:], name)
 	return p
 }
@@ -601,20 +621,23 @@ const (
 	tablePayloadN = 1 + tableEntries*4 // 33: [page] + 8 * int32
 )
 
-// getTableEntry reads one slot from an 8-entry int32 BE page table.
+// getTableEntry reads one slot from an 8-entry int32 BE page table. The wire slot is
+// 1-based (slot 0 unused), matching the slot-name and SetPosition commands, so the
+// 0-based ASCOM slot i is stored at flat wire index i+1.
 func (o *Oasis) getTableEntry(getOp byte, slot int) (uint32, error) {
 	if slot < 0 || slot > 0xff {
 		return 0, fmt.Errorf("oasis: slot %d out of range", slot)
 	}
+	ws := slot + 1 // wire is 1-based
 	pl := make([]byte, tablePayloadN)
-	pl[0] = byte(slot / tableEntries) // page
+	pl[0] = byte(ws / tableEntries) // page
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	r, err := o.command(getOp, pl)
 	if err != nil {
 		return 0, err
 	}
-	off := tableDataOff + (slot%tableEntries)*4
+	off := tableDataOff + (ws%tableEntries)*4
 	if len(r) < off+4 {
 		return 0, errors.New("oasis: short table reply")
 	}
@@ -626,7 +649,8 @@ func (o *Oasis) setTableEntry(getOp, setOp byte, slot int, v uint32) error {
 	if slot < 0 || slot > 0xff {
 		return fmt.Errorf("oasis: slot %d out of range", slot)
 	}
-	page := byte(slot / tableEntries)
+	ws := slot + 1 // wire is 1-based (see getTableEntry)
+	page := byte(ws / tableEntries)
 	rd := make([]byte, tablePayloadN)
 	rd[0] = page
 	o.mu.Lock()
@@ -641,18 +665,21 @@ func (o *Oasis) setTableEntry(getOp, setOp byte, slot int, v uint32) error {
 	wpl := make([]byte, tablePayloadN)
 	wpl[0] = page
 	copy(wpl[1:], r[tableDataOff:tableDataOff+tableEntries*4])
-	binary.BigEndian.PutUint32(wpl[1+(slot%tableEntries)*4:], v)
+	binary.BigEndian.PutUint32(wpl[1+(ws%tableEntries)*4:], v)
 	_, err = o.command(setOp, wpl)
 	return err
 }
 
-// readTable reads the first n entries of an 8-per-page int32 BE table (one command
-// per page), e.g. all slots' focus offsets or colors. Caller holds mu.
+// readTable reads n slots from an 8-per-page int32 BE table (one command per page),
+// e.g. all slots' focus offsets or colors, mapped onto the 0-based ASCOM slot array.
+// Wire slots are 1-based (slot 0 unused — see getTableEntry), so ASCOM slot i is at
+// flat wire index i+1; this reads flat indices 1..n. Caller holds mu.
 func (o *Oasis) readTable(getOp byte, n int) ([]uint32, error) {
 	out := make([]uint32, 0, n)
-	for page := 0; len(out) < n; page++ {
+	for flat := 1; len(out) < n; { // flat wire index, 1-based
+		page := byte(flat / tableEntries)
 		pl := make([]byte, tablePayloadN)
-		pl[0] = byte(page)
+		pl[0] = page
 		r, err := o.command(getOp, pl)
 		if err != nil {
 			return nil, err
@@ -660,9 +687,10 @@ func (o *Oasis) readTable(getOp byte, n int) ([]uint32, error) {
 		if len(r) < tableDataOff+tableEntries*4 {
 			return nil, errors.New("oasis: short table reply")
 		}
-		for i := 0; i < tableEntries && len(out) < n; i++ {
+		for i := flat % tableEntries; i < tableEntries && len(out) < n; i++ {
 			off := tableDataOff + i*4
 			out = append(out, binary.BigEndian.Uint32(r[off:off+4]))
+			flat++
 		}
 	}
 	return out, nil

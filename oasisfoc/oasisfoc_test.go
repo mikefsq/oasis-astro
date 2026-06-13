@@ -10,10 +10,11 @@ import (
 // reply keyed by opcode — so the protocol layer is testable with no hardware/cgo.
 type fakeHID struct {
 	mu      sync.Mutex
-	written [][]byte
-	replies map[byte][]byte
-	drained int
-	failW   bool
+	written    [][]byte
+	replies    map[byte][]byte
+	drained    int
+	failW      bool
+	failWrites int // fail this many writes (transient), then succeed
 }
 
 func newFake() *fakeHID { return &fakeHID{replies: map[byte][]byte{}} }
@@ -22,6 +23,10 @@ func (f *fakeHID) Write(buf []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failW {
+		return 0, errGone
+	}
+	if f.failWrites > 0 {
+		f.failWrites--
 		return 0, errGone
 	}
 	f.written = append(f.written, append([]byte(nil), buf...))
@@ -74,6 +79,24 @@ func (goneErr) Error() string { return "device removed" }
 var errGone = goneErr{}
 
 func testFoc(f *fakeHID) *Oasis { return New(f, DeviceInfo{VID: VID, PID: PID}) }
+
+// TestWriteRetry: a transient write failure is retried (so a momentary USB stall does
+// not surface as a command error), but a persistently failing write still errors.
+func TestWriteRetry(t *testing.T) {
+	f := newFake()
+	f.replies[opStatus] = statusReply(12345, 0)
+	f.failWrites = writeTries - 1 // first N-1 writes fail, the last succeeds
+	if p, err := testFoc(f).Position(); err != nil || p != 12345 {
+		t.Fatalf("Position() = %d, %v; want 12345 after transient write retries", p, err)
+	}
+
+	f2 := newFake()
+	f2.replies[opStatus] = statusReply(12345, 0)
+	f2.failWrites = writeTries // every attempt fails
+	if _, err := testFoc(f2).Position(); err == nil {
+		t.Error("Position() should error when every write attempt fails")
+	}
+}
 
 // status reply with position=5000, moving=0 (16 bytes).
 func statusReply(pos uint32, moving byte) []byte {

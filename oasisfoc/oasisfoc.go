@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"time"
 )
 
 // --- Oasis focuser HID framing. Identical transport and framing to the Oasis filter
@@ -20,6 +21,14 @@ const (
 	reportLen   = 65
 	reportID    = 0x00
 	replyWaitMS = 100
+
+	// A transient HID write failure (USB power-management wake on a Full-Speed device,
+	// a hub transaction-translator stall, or a brief IOKit hiccup) is retried before the
+	// device is declared lost — a single rejected SetReport must not tear the handle down.
+	// Safe to resend: a failed IOHIDDeviceSetReport did not deliver the report, so the
+	// device still receives the command exactly once (on the attempt that succeeds).
+	writeTries        = 3
+	writeRetryBackoff = 8 * time.Millisecond
 
 	// Opcodes.
 	opSerial           = 0x03 // factory serial (read)
@@ -110,8 +119,15 @@ func (o *Oasis) command(opcode byte, payload []byte) ([]byte, error) {
 	frame := make([]byte, reportLen)
 	frame[0], frame[1], frame[2] = reportID, opcode, byte(len(payload))
 	copy(frame[3:], payload)
-	if _, err := o.t.Write(frame); err != nil {
-		return nil, fmt.Errorf("oasisfoc: write opcode 0x%02x: %w", opcode, err)
+	var werr error
+	for try := 0; try < writeTries; try++ {
+		if _, werr = o.t.Write(frame); werr == nil {
+			break
+		}
+		time.Sleep(writeRetryBackoff) // transient stall — brief backoff, then resend
+	}
+	if werr != nil {
+		return nil, fmt.Errorf("oasisfoc: write opcode 0x%02x (after %d tries): %w", opcode, writeTries, werr)
 	}
 
 	// Read the reply, SKIPPING any stale report whose echo != our opcode. The interrupt-IN
