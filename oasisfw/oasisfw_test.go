@@ -111,12 +111,12 @@ func allReplies() map[byte][]byte {
 		opSetSlotName:      {opSetSlotName, 0x00},
 		// Wire slots are 1-based: ASCOM slot 0 reads flat table entry 1, so the canned
 		// value sits at entry 1 (entry 0 is the unused wire slot 0).
-		opGetFocusOffset:   tableReply(opGetFocusOffset, 1, 100),
-		opSetFocusOffset:   {opSetFocusOffset, 0x00},
-		opGetColor:         tableReply(opGetColor, 1, 0x00112233),
-		opSetColor:         {opSetColor, 0x00},
-		opSetPosition:      {opSetPosition, 0x00},
-		opCalibrate:        {opCalibrate, 0x00},
+		opGetFocusOffset: tableReply(opGetFocusOffset, 1, 100),
+		opSetFocusOffset: {opSetFocusOffset, 0x00},
+		opGetColor:       tableReply(opGetColor, 1, 0x00112233),
+		opSetColor:       {opSetColor, 0x00},
+		opSetPosition:    {opSetPosition, 0x00},
+		opCalibrate:      {opCalibrate, 0x00},
 	}
 }
 

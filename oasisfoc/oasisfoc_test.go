@@ -9,7 +9,7 @@ import (
 // fakeHID is an in-memory Transport: records command frames and returns a canned
 // reply keyed by opcode — so the protocol layer is testable with no hardware/cgo.
 type fakeHID struct {
-	mu      sync.Mutex
+	mu         sync.Mutex
 	written    [][]byte
 	replies    map[byte][]byte
 	drained    int
