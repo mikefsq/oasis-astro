@@ -120,8 +120,6 @@ func allReplies() map[byte][]byte {
 	}
 }
 
-// --- Encode: the exact command frame for each operation ---
-
 func TestEncodeCommands(t *testing.T) {
 	cases := []struct {
 		name string
@@ -162,8 +160,6 @@ func TestEncodeCommands(t *testing.T) {
 	}
 }
 
-// --- The transceiver drains stale input before writing ---
-
 func TestCommandDrainsBeforeWrite(t *testing.T) {
 	f := newFake()
 	f.replies[opStatus] = []byte{opStatus, 0x06, 0, 0, 0, 0, 0x02, stateIdle, 0, 0}
@@ -172,8 +168,6 @@ func TestCommandDrainsBeforeWrite(t *testing.T) {
 		t.Error("expected at least one drain read before the command write")
 	}
 }
-
-// --- Decode: status reply parses to position/state ---
 
 func TestDecodePosition(t *testing.T) {
 	f := newFake()
@@ -278,8 +272,6 @@ func TestHandshakeCachesInfo(t *testing.T) {
 	}
 }
 
-// --- An opcode mismatch in the reply is rejected ---
-
 func TestReplyOpcodeMismatch(t *testing.T) {
 	f := newFake()
 	f.replies[opStatus] = []byte{0xFF, 0x00} // wrong echo
@@ -288,8 +280,6 @@ func TestReplyOpcodeMismatch(t *testing.T) {
 	}
 }
 
-// --- A transport error surfaces, never panics ---
-
 func TestDeviceRemoved(t *testing.T) {
 	f := newFake()
 	f.failW = true
@@ -297,8 +287,6 @@ func TestDeviceRemoved(t *testing.T) {
 		t.Error("Position: want error on removed device")
 	}
 }
-
-// --- Concurrency: the per-device lock holds under -race ---
 
 func TestConcurrentAccess(t *testing.T) {
 	f := newFake()

@@ -1,64 +1,92 @@
 # oasis-astro
 
-Go drivers for **Astroasis Oasis** USB accessories — talking each device's HID
-protocol directly, with no vendor SDK in the process:
+Go drivers for Astroasis Oasis USB accessories, without a vendor SDK:
 
-- **`oasisfw/`** — Oasis filter wheel
-- **`oasisfoc/`** — Oasis focuser (absolute, with temperature)
+- `oasisfw`: filter wheel, slot names, focus offsets, and configuration.
+- `oasisfoc`: absolute focuser, temperature, motion, and configuration.
 
-Both devices are driven over HID **interrupt** endpoints (`hid_write` / `hid_read_timeout`),
-not feature reports, and share the same wire conventions: 65-byte reports, big-endian
-numerics, and a set of per-OS transport backends. The cgo backend's C symbols are
-prefixed per package, so both drivers can link into one binary.
+## Build and run
 
-```
-command : [0]=0x00 reportID  [1]=opcode  [2]=payloadLen  [3..]=payload (padded to 65)
-reply   : [0]=opcode echo    [1]=len     [2..]=data
-```
-
-Astroasis vendor ID is `0x338F`; the filter wheel is PID `0x0FE0`, the focuser PID
-`0xA0F0`.
-
-
-| | Filter wheel (`oasisfw`) | Focuser (`oasisfoc`) |
-|---|---|---|
-| USB ID | VID `0x338F` / PID `0x0FE0` | VID `0x338F` / PID `0xA0F0` |
-| Identity | model, serial, hardware/firmware/protocol versions, firmware build date | model, serial, hardware/firmware/protocol versions, firmware build date |
-| Read surface | status (position, state, temperature), slot count, per-slot names / focus offsets / colors, config | status (position, moving, internal + external temperature), config + extended config |
-| Motion | go-to slot, calibrate (home + realign) | absolute / relative move, stop, sync position, set-zero, clear-stall |
-| Writes | slot names, focus offsets, ARGB colors, friendly / Bluetooth names, config, factory reset | beep / backlash / reverse / speed / max-step, dew heater, stall detection, USB-power budget, names, factory reset |
-| Backends | darwin (IOKit/cgo), linux (hidraw, pure Go), windows (SetupAPI, pure Go) | same |
-| Tests | `go test -race ./oasisfw/` over a fake transport | `go test -race ./oasisfoc/` over a fake transport |
-
-## Layout
-
-```
-oasisfw/ , oasisfoc/
-  oasisfw.go / oasisfoc.go   device logic + HID interrupt framing (pure Go, all platforms)
-  transport.go               the Transport interface (the seam) + DeviceInfo + USB IDs
-  transport_darwin.go        macOS   — IOKit (cgo): SetReport(Output) + input-report callback
-  transport_linux.go         Linux   — hidraw via raw O_NONBLOCK read/write (pure Go)
-  transport_windows.go       Windows — SetupAPI + overlapped ReadFile/WriteFile (pure Go)
-  transport_stub.go          other   — compile-only
-  *_test.go                  protocol tests over a fake Transport (no hardware, no cgo)
-cmd/oasisfwprobe/            CLI to open / inspect / drive a wheel
-cmd/oasisfocprobe/           CLI to open / inspect / drive a focuser
-```
-
-## Build & test
+Requires Go 1.21 or later. macOS uses IOKit through cgo and requires Apple's
+command-line tools. Linux and Windows transports do not require cgo.
 
 ```sh
-# unit tests (no hardware needed)
-go test -race ./...
-
-# cross-build a probe for a deploy target (e.g. Raspberry Pi); linux/windows are pure Go
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o oasisfwprobe  ./cmd/oasisfwprobe
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o oasisfocprobe ./cmd/oasisfocprobe
+go build -o oasisfwprobe ./cmd/oasisfwprobe
+go build -o oasisfocprobe ./cmd/oasisfocprobe
+./oasisfwprobe
+./oasisfocprobe
 ```
 
-On Linux, opening the device needs a udev rule so the service user can reach the
-hidraw node:
+Each probe opens the first matching device and reads its status. Motion and
+configuration flags operate the hardware:
 
+```sh
+./oasisfwprobe -goto 2
+./oasisfocprobe -moveto 12000
+./oasisfocprobe -stop
 ```
+
+Use `-help` for all options. Configuration tests temporarily change settings
+and attempt to restore them; the focuser's heater test also enables heating.
+
+## Use the library
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+
+    "github.com/mikefsq/oasis-astro/oasisfw"
+)
+
+func run() error {
+    device, err := oasisfw.OpenFirst()
+    if err != nil {
+        return err
+    }
+    defer device.Close()
+
+    value, err := device.Position()
+    if err != nil {
+        return err
+    }
+    fmt.Println(value)
+    return nil
+}
+
+func main() {
+    if err := run(); err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
+Both packages provide `Enumerate`, `OpenFirst`, and `OpenAt` for selecting
+devices. Filter-wheel slots are zero-based. The focuser provides absolute and
+relative moves, position synchronization, and temperature readings.
+
+On Linux, grant the user access to the device's `/dev/hidraw*` node.
+For a logged-in desktop user, a udev rule can use:
+
+```text
 KERNEL=="hidraw*", ATTRS{idVendor}=="338f", MODE="0660", TAG+="uaccess"
 ```
+
+A background service needs permissions for its service account, such as a
+device group assigned by a local udev rule.
+
+## Development
+
+```sh
+go test -race ./...
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./...
+```
+
+Tests use fake transports. See [PROTOCOL.md](PROTOCOL.md) for HID framing
+and the package `Transport` interfaces for adding a backend.
+
+## License
+
+[MIT](LICENSE).

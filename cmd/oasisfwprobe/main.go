@@ -1,20 +1,4 @@
-// Command oasisfwprobe exercises the pure-Go Oasis filter-wheel driver against a
-// real wheel: it opens the first wheel, dumps the full decoded read surface
-// (identity, status, config, names, focus offsets, colors), can move/calibrate,
-// and can drive the (persistent) setters with read-back verification.
-//
-//	oasisfwprobe                    # read-only: dump everything the driver decodes
-//	oasisfwprobe -goto 2            # move to slot 2 (0-based), then watch it settle
-//	oasisfwprobe -calibrate         # run the home/realign routine
-//	oasisfwprobe -watch             # poll position+state repeatedly
-//
-//	# PERSISTENT writes (each writes then reads back to verify):
-//	oasisfwprobe -setfocus 2:-150   # slot 2 focus offset = -150
-//	oasisfwprobe -setcolor 0:00ff00 # slot 0 color = 0x00ff00 (RRGGBB hex)
-//	oasisfwprobe -setslotname 1:Ha  # slot 1 name = "Ha"
-//	oasisfwprobe -setbtname OasisFW  # bluetooth name
-//	oasisfwprobe -setconfig 00000005...  # raw config block (hex)
-//	oasisfwprobe -factoryreset      # restore factory defaults
+// Command oasisfwprobe reads device status and provides diagnostic controls.
 
 package main
 

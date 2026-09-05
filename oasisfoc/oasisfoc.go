@@ -9,24 +9,13 @@ import (
 	"time"
 )
 
-// --- Oasis focuser HID framing. Identical transport and framing to the Oasis filter
-// wheel (oasisfw): a 65-byte interrupt report.
-//
-//	command : [0]=0x00 reportID  [1]=opcode  [2]=payloadLen  [3..]=payload (padded to 65)
-//	reply   : [0]=opcode echo    [1]=len     [2..]=data
-//
-// Multi-byte numeric fields are BIG-ENDIAN.
-// The transceiver drains stale IN reports, writes, then reads the reply.
+// HID commands use 65-byte reports and big-endian fields; see PROTOCOL.md.
 const (
 	reportLen   = 65
 	reportID    = 0x00
 	replyWaitMS = 100
 
-	// A transient HID write failure (USB power-management wake on a Full-Speed device,
-	// a hub transaction-translator stall, or a brief IOKit hiccup) is retried before the
-	// device is declared lost — a single rejected SetReport must not tear the handle down.
-	// Safe to resend: a failed IOHIDDeviceSetReport did not deliver the report, so the
-	// device still receives the command exactly once (on the attempt that succeeds).
+	// Retry transient write errors before reporting failure.
 	writeTries        = 3
 	writeRetryBackoff = 8 * time.Millisecond
 
@@ -130,10 +119,8 @@ func (o *Oasis) command(opcode byte, payload []byte) ([]byte, error) {
 		return nil, fmt.Errorf("oasisfoc: write opcode 0x%02x (after %d tries): %w", opcode, writeTries, werr)
 	}
 
-	// Read the reply, SKIPPING any stale report whose echo != our opcode. The interrupt-IN
-	// drain above is racy — a reply to a previous command can land in the queue after the
-	// drain and before our reply, so the first report read may be that leftover. Discard
-	// mismatches and read the next, bounded so a genuinely silent opcode still fails promptly.
+	// Discard mismatched opcode replies that arrive after draining stale input.
+	// Bound retries so an absent reply still times out.
 	for attempts := 0; attempts < 8; attempts++ {
 		reply := make([]byte, reportLen)
 		n, err := o.t.Read(reply, replyWaitMS)
@@ -151,7 +138,7 @@ func (o *Oasis) command(opcode byte, payload []byte) ([]byte, error) {
 	return nil, fmt.Errorf("oasisfoc: no matching reply to 0x%02x (only stale reports)", opcode)
 }
 
-// Command issues a raw command and returns the raw reply, for hardware debugging.
+// Command oasisfoc reads device status and provides diagnostic controls.
 func (o *Oasis) Command(opcode byte, payload []byte) ([]byte, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -656,8 +643,6 @@ func (o *Oasis) FirmwareBuildDate() string {
 	}
 	return cstr(v[2+verBuilt:])
 }
-
-// --- Names + factory reset ---
 
 // FriendlyName reads the user friendly name (NUL-terminated, 32-byte field).
 func (o *Oasis) FriendlyName() (string, error) { return o.readName(opGetFriendlyName) }

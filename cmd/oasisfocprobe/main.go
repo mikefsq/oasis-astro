@@ -1,14 +1,4 @@
-// Command oasisfocprobe exercises the pure-Go Oasis focuser driver against a device
-// it opens the first focuser, dumps the decoded read surface, and can move.
-//
-//	oasisfocprobe                 # read-only: dump status, position, temps, serial
-//	oasisfocprobe -moveto 12000   # absolute move, then watch it settle
-//	oasisfocprobe -move 1:500     # relative move dir:steps
-//	oasisfocprobe -stop           # halt motion
-//	oasisfocprobe -sync 0         # set reported position without moving
-//	oasisfocprobe -setzero        # define current position as zero
-//	oasisfocprobe -clearstall     # clear a stall condition
-//	oasisfocprobe -watch          # poll position+moving repeatedly
+// Command oasisfocprobe reads device status and provides diagnostic controls.
 package main
 
 import (

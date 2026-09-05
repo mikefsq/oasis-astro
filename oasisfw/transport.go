@@ -1,9 +1,4 @@
-// Package oasisfw is a pure-Go driver for the Astroasis Oasis filter wheel,
-// talking the device's USB-HID protocol directly — no vendor SDK in the process.
-//
-// Unlike the ZWO EFW (which uses HID *feature* reports), the Oasis wheel is driven
-// over HID *interrupt* endpoints: commands go out via an interrupt OUT report and
-// replies come back on interrupt IN.
+// Package oasisfw controls Astroasis Oasis filter wheels through HID interrupt reports.
 package oasisfw
 
 // Astroasis USB IDs for the Oasis filter wheel.
@@ -12,13 +7,8 @@ const (
 	PID uint16 = 0x0FE0
 )
 
-// Transport is the minimal HID interrupt channel the Oasis wheel needs. A backend
-// (IOKit, hidraw, hid.dll) provides it; the device logic above is transport-agnostic.
-//
-// Write sends one interrupt OUT report; buf[0] is the HID report ID (0x00 for this
-// device). Read reads one interrupt IN report, waiting up to timeoutMS (<=0 = poll,
-// returning 0 bytes if nothing is queued — used to drain stale input before a
-// command). Both return the number of bytes transferred.
+// Transport reads and writes HID interrupt reports. Write includes report ID 0.
+// Read polls when timeoutMS <= 0 and returns zero bytes when no report is queued.
 type Transport interface {
 	Write(buf []byte) (int, error)
 	Read(buf []byte, timeoutMS int) (int, error)

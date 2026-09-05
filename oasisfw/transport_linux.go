@@ -2,13 +2,7 @@
 
 package oasisfw
 
-// Linux HID transport for the Oasis wheel: pure Go over hidraw (/dev/hidrawN).
-// The Oasis wheel uses interrupt endpoints, so commands/replies are ordinary
-// write()/read() on the hidraw fd (not feature-report ioctls). Requires a udev
-// rule so the service user can open the device, e.g.:
-//
-//	KERNEL=="hidraw*", ATTRS{idVendor}=="338f", MODE="0660", TAG+="uaccess"
-//
+// Linux HID transport using nonblocking hidraw reads and writes.
 
 import (
 	"bufio"

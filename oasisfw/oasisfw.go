@@ -9,30 +9,14 @@ import (
 	"time"
 )
 
-// --- Oasis HID framing
-//
-// The vendor builds a small command descriptor {opcode, payloadLen, payload...},
-// prepends a 0x00 report-ID byte, zero-pads to a 65-byte report, and writes it on
-// the interrupt OUT endpoint; the reply comes back on interrupt IN.
-//
-//	command : [0]=0x00 reportID  [1]=opcode  [2]=payloadLen  [3..]=payload (padded to 65)
-//	reply   : [0]=opcode echo    [1]=len     [2..]=data
-//
-// Multi-byte numeric fields are BIG-ENDIAN on the wire.
-// The reply data offset is not uniform across commands: status data
-// starts at reply[2], the focus/color page tables at reply[3].
-//
-// The transceiver drains any stale IN reports, writes the command, then reads the
-// reply.
+// HID commands use 65-byte reports and big-endian fields; see PROTOCOL.md.
+// Status data starts at reply offset 2; focus and colour tables start at offset 3.
 const (
 	reportLen   = 65   // 1 report-ID byte + 64-byte payload
 	reportID    = 0x00 // this device uses report ID 0 (unnumbered); it leads the OUT buffer
 	replyWaitMS = 100  // hid_read_timeout
 
-	// A transient HID write failure (USB power-management wake on a Full-Speed device,
-	// a hub transaction-translator stall, or a brief IOKit hiccup) is retried before the
-	// device is declared lost. Safe to resend: a failed IOHIDDeviceSetReport did not
-	// deliver the report, so the device receives the command exactly once.
+	// Retry transient write errors before reporting failure.
 	writeTries        = 3
 	writeRetryBackoff = 8 * time.Millisecond
 
@@ -154,11 +138,8 @@ func (o *Oasis) command(opcode byte, payload []byte) ([]byte, error) {
 		return nil, fmt.Errorf("oasis: write opcode 0x%02x (after %d tries): %w", opcode, writeTries, werr)
 	}
 
-	// Read the reply, SKIPPING any stale report whose echo != our opcode. The interrupt-IN
-	// drain above is racy — a reply to a previous command (e.g. a large multi-field read like
-	// the 0x55 color page just before a 0x57 move) can land in the queue after the drain and
-	// before our reply, so the first report read may be that leftover. Discard mismatches and
-	// read the next, bounded so a genuinely silent opcode still fails promptly.
+	// Discard mismatched opcode replies that arrive after draining stale input.
+	// Bound retries so an absent reply still times out.
 	for attempts := 0; attempts < 8; attempts++ {
 		reply := make([]byte, reportLen)
 		n, err := o.t.Read(reply, replyWaitMS)
@@ -176,8 +157,7 @@ func (o *Oasis) command(opcode byte, payload []byte) ([]byte, error) {
 	return nil, fmt.Errorf("oasis: no matching reply to 0x%02x (only stale reports)", opcode)
 }
 
-// Command issues a raw command and returns the raw reply, for
-// validation/debugging against real hardware.
+// Command oasisfw reads device status and provides diagnostic controls.
 func (o *Oasis) Command(opcode byte, payload []byte) ([]byte, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -415,8 +395,6 @@ func (o *Oasis) FactoryReset() error {
 	return err
 }
 
-// --- Identity: handshake + cached version/model ---
-
 // Handshake issues the two identify commands at connect (opInfoA then opInfoB) and
 // caches their raw replies, which feed VersionRaw/ModelRaw. It is called
 // automatically by OpenFirst/OpenAt; callers using New may invoke it themselves.
@@ -522,8 +500,6 @@ func (o *Oasis) FirmwareBuildDate() string {
 	return cstr(v[2+verBuilt:])
 }
 
-// --- Names (friendly / bluetooth / per-slot) ---
-
 // FriendlyName reads the user-set friendly name.
 func (o *Oasis) FriendlyName() (string, error) { return o.readName(opGetFriendlyName, nil) }
 
@@ -558,12 +534,7 @@ func (o *Oasis) setName32(opcode byte, name string) error {
 // at [2] and the 16-byte name from [3]. A variable-length name payload gets no reply.
 const slotNameLen = 16
 
-// slotNameField builds the fixed [slot, name padded to 16] slot-name payload. The
-// wire slot is 1-based — the same +1 convention as SetPosition (the device numbers
-// physical positions 1..N; position 0 is unused). The caller passes a 0-based ASCOM
-// slot, so reading/writing ASCOM slot i addresses wire slot i+1. Without this the
-// name table reads one slot low: ASCOM slot 0 hit the empty wire slot 0 and every
-// real name came back shifted up by one (hardware-confirmed against an LRGB+Ha wheel).
+// slotNameField encodes a zero-based slot as a one-based wire index and a 16-byte name.
 func slotNameField(slot int, name string) []byte {
 	p := make([]byte, 1+slotNameLen)
 	p[0] = byte(slot + 1) // wire is 1-based
@@ -609,12 +580,8 @@ func (o *Oasis) SetSlotName(slot int, name string) error {
 	return err
 }
 
-// --- Per-slot focus offsets & colors (8-entry int32 big-endian tables) ---
-//
-// each is a whole page of 8 big-endian
-// int32 entries, indexed by slot. The command payload is [page, 0x00*32]
-// (descriptor byte[1] = 0x21 = 33), and the reply carries the 8 int32 starting at
-// data offset 3, each run through ntohl. The SET-page frame mirrors the GET page —
+// Focus and colour pages contain eight big-endian int32 values.
+// Requests carry [page, 32 zero bytes]; replies begin the table at offset 3.
 const (
 	tableEntries  = 8                  // entries per page
 	tableDataOff  = 3                  // reply offset where the int32 table begins
@@ -773,8 +740,6 @@ func (o *Oasis) Color(slot int) (uint32, error) {
 func (o *Oasis) SetColor(slot int, color uint32) error {
 	return o.setTableEntry(opGetColor, opSetColor, slot, color)
 }
-
-// --- internal helpers ---
 
 // readRaw issues a no-payload read command and returns its reply payload (reply[2:]).
 // Caller holds mu.

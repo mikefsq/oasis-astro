@@ -1,8 +1,4 @@
-// Package oasisfoc is a pure-Go driver for the Astroasis Oasis focuser, talking the
-// device's USB-HID protocol directly — no vendor SDK in the process.
-//
-// Like the Oasis filter wheel (the oasisfw package), the focuser is driven over HID
-// *interrupt* endpoints (hid_write / hid_read_timeout), not feature reports.
+// Package oasisfoc controls Astroasis Oasis focusers through HID interrupt reports.
 
 package oasisfoc
 
@@ -12,12 +8,8 @@ const (
 	PID uint16 = 0xA0F0
 )
 
-// Transport is the minimal HID interrupt channel the Oasis focuser needs. A backend
-// (IOKit, hidraw, hid.dll) provides it; the device logic is transport-agnostic.
-//
-// Write sends one interrupt OUT report (buf[0] is the HID report ID, 0x00). Read
-// reads one interrupt IN report, waiting up to timeoutMS (<=0 = poll, used to drain
-// stale input before a command). Both return the number of bytes transferred.
+// Transport reads and writes HID interrupt reports. Write includes report ID 0.
+// Read polls when timeoutMS <= 0 and returns zero bytes when no report is queued.
 type Transport interface {
 	Write(buf []byte) (int, error)
 	Read(buf []byte, timeoutMS int) (int, error)
